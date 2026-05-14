@@ -4,7 +4,7 @@ import cv2
 import numpy as np
 from pathlib import Path
 from tqdm import tqdm
-from utils import flight_filter, georef, io_data, mosaic, transforms
+from utils import features, flight_filter, georef, io_data, matching, mosaic, refine, transforms
 from utils.geodesy import gsd_meters_per_pixel, make_transformers
 
 ROOT = Path(__file__).resolve().parent
@@ -18,10 +18,10 @@ CONFIG = {
     "output_tiff": ROOT / "output" / "mosaic.tif",
 
     # --- Range frame (1-indexed, estremi inclusi). frame_end=None per "fino alla fine". ---
-    "frame_start": 2,
+    "frame_start": 1,
     "frame_end": 807,
 
-    # --- Parametri di volo (per ora non usati, riservati per la prossima iterazione) ---
+    # --- Parametri di volo (servono al feature matching per filtrare le coppie di vicini) ---
     "lateral_overlap": 0.81,
     "frontal_overlap": 0.81,
 
@@ -32,6 +32,14 @@ CONFIG = {
     "skip_curves": True,
     "roll_threshold_deg": 10.0,
     "yaw_rate_threshold_deg": 5.0,
+
+    # --- Feature matching + raffinamento globale ---
+    "refine_with_features": True,
+    "max_features": 3000,             # numero di feature ORB per frame
+    "max_neighbors_per_frame": 3,     # massimo n. di coppie matching per frame
+    "min_inliers_per_pair": 10,       # sotto questa soglia la coppia viene scartata
+    "gps_weight": 0.5,                # quanto pesa il prior GPS rispetto ai vincoli feature
+    "refine_max_iter": 30,
 }
 
 
@@ -76,6 +84,97 @@ def _load_image(path: Path, downscale: float) -> np.ndarray | None:
 def _frame_altitude(rec: dict) -> float:
     rel = rec.get("relative_alt_m")
     return abs(rel) if rel is not None else abs(rec["altitude_m"])
+
+
+def _maybe_refine_poses(
+    cfg: dict,
+    records: list,
+    initial_M: list,
+    positions_m_local: list,
+    gsd_canvas: float,
+    gsds: list,
+    image_size: tuple[int, int],
+) -> list:
+    """Se abilitato, estrae feature, calcola coppie vicini, matcha, raffina. Altrimenti ritorna initial_M."""
+    if not cfg.get("refine_with_features", True):
+        return initial_M
+
+    w0, h0 = image_size
+    downscale: float = cfg.get("downscale", 2.5)
+    max_feats: int = cfg.get("max_features", 1500)
+    max_neighbors: int = cfg.get("max_neighbors_per_frame", 8)
+    min_inliers: int = cfg.get("min_inliers_per_pair", 12)
+    gps_weight: float = cfg.get("gps_weight", 0.3)
+    refine_iter: int = cfg.get("refine_max_iter", 30)
+    lateral_overlap: float = cfg.get("lateral_overlap", 0.5)
+    frontal_overlap: float = cfg.get("frontal_overlap", 0.5)
+
+    # 1) Feature extraction: una alla volta per non saturare la RAM
+    detector = features.make_detector(max_features=max_feats)
+    keypoints_all = []
+    descriptors_all = []
+    print("[refine] Estrazione feature ORB...")
+    for r in tqdm(records, desc="features"):
+        img = _load_image(r["path"], downscale)
+        if img is None:
+            keypoints_all.append([])
+            descriptors_all.append(None)
+            continue
+        gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+        kps, des = features.detect(detector, gray)
+        keypoints_all.append(kps)
+        descriptors_all.append(des)
+        del img, gray
+
+    # 2) Coppie di vicini da GPS
+    footprint_m = max(w0, h0) * float(np.mean(gsds))
+    radius = matching.neighbor_radius_m(footprint_m, lateral_overlap, frontal_overlap)
+    pairs = matching.build_neighbor_pairs(
+        positions_m_local, radius_m=radius, max_neighbors_per_frame=max_neighbors
+    )
+    print(f"[refine] Footprint ~{footprint_m:.1f} m, raggio vicini {radius:.1f} m, coppie: {len(pairs)}")
+
+    # 3) Matching + similarity per ogni coppia
+    matcher = matching.make_matcher()
+    constraints: list[tuple[int, int, np.ndarray, int]] = []
+    n_low_inliers = 0
+    n_no_homog = 0
+    for (i, j) in tqdm(pairs, desc="match"):
+        good = matching.match_descriptors(matcher, descriptors_all[i], descriptors_all[j])
+        if len(good) < min_inliers:
+            n_low_inliers += 1
+            continue
+        H_ij, n_inl = matching.similarity_from_matches(
+            keypoints_all[i], keypoints_all[j], good
+        )
+        if H_ij is None:
+            n_no_homog += 1
+            continue
+        if n_inl < min_inliers:
+            n_low_inliers += 1
+            continue
+        constraints.append((i, j, H_ij, n_inl))
+    print(
+        f"[refine] Vincoli validi: {len(constraints)} / {len(pairs)} "
+        f"(scartati: {n_low_inliers} per pochi inlier, {n_no_homog} per H_ij None)"
+    )
+
+    if len(constraints) < 1:
+        print("[refine] Nessun vincolo valido: salto il raffinamento, uso le pose GPS.")
+        return initial_M
+
+    # 4) LSQ globale
+    print(f"[refine] Least-squares globale: {len(records)*4} parametri, "
+          f"{len(records)*8 + len(constraints)*8} residui, gps_weight={gps_weight}")
+    refined = refine.refine_poses(
+        initial_M,
+        constraints,
+        image_size=(w0, h0),
+        gps_weight=gps_weight,
+        max_iter=refine_iter,
+        verbose=1,
+    )
+    return refined
 
 
 def run_pipeline(cfg: dict) -> None:
@@ -143,9 +242,10 @@ def run_pipeline(cfg: dict) -> None:
 
     # 5b) Spacing medio (mediano) tra frame consecutivi -> altezza della striscia per frame
     positions_m = [to_utm.transform(r["lon"], r["lat"]) for r in records]
+    positions_m_local = [(e - e0, n_ - n0) for e, n_ in positions_m]
     distances_m = [
-        float(np.hypot(positions_m[i + 1][0] - positions_m[i][0],
-                       positions_m[i + 1][1] - positions_m[i][1]))
+        float(np.hypot(positions_m_local[i + 1][0] - positions_m_local[i][0],
+                       positions_m_local[i + 1][1] - positions_m_local[i][1]))
         for i in range(len(records) - 1)
     ]
     spacing_m = float(np.median(distances_m)) if distances_m else float(h0 * gsd_canvas)
@@ -155,8 +255,11 @@ def run_pipeline(cfg: dict) -> None:
         f"(immagine altezza {h0} px)"
     )
 
+    # 5c) Feature matching tra vicini + raffinamento globale delle pose
+    refined_M = _maybe_refine_poses(cfg, records, initial_M, positions_m_local, gsd_canvas, gsds, (w0, h0))
+
     # 6) Calcola canvas
-    shifted_M, canvas_size, (off_x, off_y) = mosaic.compute_canvas(initial_M, image_sizes)
+    shifted_M, canvas_size, (off_x, off_y) = mosaic.compute_canvas(refined_M, image_sizes)
     print(f"[pipeline] Canvas: {canvas_size[0]} x {canvas_size[1]}")
 
     # 6b) Visualizzazione di diagnostica: layout dei frame nel canvas

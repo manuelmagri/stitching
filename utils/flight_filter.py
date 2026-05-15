@@ -1,8 +1,11 @@
-"""Filtra i frame acquisiti in curva.
+"""Marca i frame acquisiti in curva (senza scartarli).
 
 Un frame e' considerato "in curva" se almeno uno tra:
 - |FlightRollDegree| supera roll_threshold_deg (drone inclinato durante la virata)
 - |delta FlightYawDegree| verso il vicino temporale supera yaw_rate_threshold_deg
+
+I frame curva non entrano nel mosaico finale ma restano disponibili come "bridge"
+geometrici per agganciare passate adiacenti.
 """
 
 
@@ -11,23 +14,21 @@ def _yaw_diff(a: float, b: float) -> float:
     return (a - b + 180.0) % 360.0 - 180.0
 
 
-def filter_curves(
+def mark_curves(
     records: list[dict],
     roll_threshold_deg: float = 8.0,
     yaw_rate_threshold_deg: float = 4.0,
-) -> tuple[list[dict], dict]:
-    """Ritorna (record_filtrati, stats).
-
-    stats contiene: dropped, kept, dropped_indices (i numeri di frame scartati).
-    """
+) -> dict:
+    """Aggiunge in-place il campo is_curve: bool a ogni record. Ritorna statistiche."""
     n = len(records)
     if n < 3:
-        return list(records), {"dropped": 0, "kept": n, "dropped_indices": []}
+        for r in records:
+            r["is_curve"] = False
+        return {"curve": 0, "straight": n, "curve_indices": []}
 
-    is_curve = [False] * n
     for i, r in enumerate(records):
         if abs(r.get("flight_roll_deg", 0.0)) > roll_threshold_deg:
-            is_curve[i] = True
+            r["is_curve"] = True
             continue
         prev_dy = (
             abs(_yaw_diff(r["flight_yaw_deg"], records[i - 1]["flight_yaw_deg"]))
@@ -39,13 +40,11 @@ def filter_curves(
             if i < n - 1
             else 0.0
         )
-        if max(prev_dy, next_dy) > yaw_rate_threshold_deg:
-            is_curve[i] = True
+        r["is_curve"] = max(prev_dy, next_dy) > yaw_rate_threshold_deg
 
-    kept = [r for r, c in zip(records, is_curve) if not c]
-    dropped_indices = [r["index"] for r, c in zip(records, is_curve) if c]
-    return kept, {
-        "dropped": len(dropped_indices),
-        "kept": len(kept),
-        "dropped_indices": dropped_indices,
+    curve_indices = [r["index"] for r in records if r["is_curve"]]
+    return {
+        "curve": len(curve_indices),
+        "straight": n - len(curve_indices),
+        "curve_indices": curve_indices,
     }

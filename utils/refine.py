@@ -6,9 +6,13 @@ Ogni frame e' parametrizzato da (tx, ty, theta, log_scale). Si minimizza la somm
 - residuo "vincolo pairwise": per ogni coppia di vicini con similarity H_ij dalle feature,
   M_i @ corners_i deve coincidere con M_j @ H_ij @ corners_i, pesato per il sqrt del numero
   di inlier (piu' inlier = vincolo piu' affidabile).
+- residuo "vincolo VO inter-frame": per ogni coppia di frame consecutivi nel tempo, il delta
+  di posizione (tx_j - tx_i, ty_j - ty_i) deve coincidere con il delta di traslazione VO,
+  pesato da vo_weight. La VO e' molto piu' precisa del GPS sul relativo inter-frame
+  (~10 cm vs ~7 m), quindi vo_weight >> gps_weight tipicamente.
 
 Il problema e' sparso: i parametri di un frame influenzano solo i suoi residui anchor e quelli
-delle coppie in cui appare. Usiamo jac_sparsity per accelerare scipy.
+delle coppie/VO in cui appare. Usiamo jac_sparsity per accelerare scipy.
 """
 import math
 
@@ -60,6 +64,8 @@ def refine_poses(
     pair_constraints: list[tuple[int, int, np.ndarray, int]],
     image_size: tuple[int, int],
     gps_weight: float = 1.0,
+    vo_constraints: list[tuple[int, int, float, float]] | None = None,
+    vo_weight: float = 5.0,
     max_iter: int = 30,
     verbose: int = 1,
 ) -> list[np.ndarray]:
@@ -67,15 +73,20 @@ def refine_poses(
 
     pair_constraints: lista di (i, j, H_ij, n_inliers) dove H_ij mappa pixel_image_i ->
     pixel_image_j.
+
+    vo_constraints: lista di (i, j, dx_canvas_px, dy_canvas_px) dove (dx, dy) e' il delta
+    di posizione atteso fra il centro del frame i e quello del frame j (in pixel canvas).
     """
     n = len(initial_M)
     if n == 0:
         return []
     w, h = image_size
+    vo_pairs = list(vo_constraints) if vo_constraints else []
 
     corners = np.array(
         [[0.0, 0.0, 1.0], [w, 0.0, 1.0], [w, h, 1.0], [0.0, h, 1.0]], dtype=np.float64
     )  # (4, 3) homogenei
+    center_pt = np.array([[w / 2.0, h / 2.0, 1.0]], dtype=np.float64)  # (1, 3)
 
     # Parametri iniziali
     x0 = np.zeros(n * 4, dtype=np.float64)
@@ -96,7 +107,8 @@ def refine_poses(
 
     n_res_anchor = n * 8  # 4 corner x 2 coord per ogni frame
     n_res_pairs = len(constraints) * 8
-    n_residuals = n_res_anchor + n_res_pairs
+    n_res_vo = len(vo_pairs) * 2
+    n_residuals = n_res_anchor + n_res_pairs + n_res_vo
     n_params = n * 4
 
     def residuals(params: np.ndarray) -> np.ndarray:
@@ -113,6 +125,14 @@ def refine_poses(
                 pts_j = c_in_j_h @ Ms[j].T  # (4, 3)
                 pair_res[k] = (pts_i[:, :2] - pts_j[:, :2]) * w_p
             out.append(pair_res.reshape(-1))
+        # VO inter-frame residuals: delta del CENTRO immagine fra i due frame
+        if vo_pairs:
+            centers = _apply_M_batch(Ms, center_pt).reshape(n, 2)  # (n, 2)
+            vo_res = np.zeros((len(vo_pairs), 2), dtype=np.float64)
+            for k, (i, j, dx, dy) in enumerate(vo_pairs):
+                vo_res[k, 0] = (centers[j, 0] - centers[i, 0] - dx) * vo_weight
+                vo_res[k, 1] = (centers[j, 1] - centers[i, 1] - dy) * vo_weight
+            out.append(vo_res.reshape(-1))
         return np.concatenate(out)
 
     # Sparsita' del jacobiano: ogni residuo dipende solo dai param dei frame coinvolti
@@ -123,6 +143,10 @@ def refine_poses(
         row0 = n_res_anchor + k * 8
         jac[row0: row0 + 8, i * 4: (i + 1) * 4] = 1
         jac[row0: row0 + 8, j * 4: (j + 1) * 4] = 1
+    for k, (i, j, _, _) in enumerate(vo_pairs):
+        row0 = n_res_anchor + n_res_pairs + k * 2
+        jac[row0: row0 + 2, i * 4: (i + 1) * 4] = 1
+        jac[row0: row0 + 2, j * 4: (j + 1) * 4] = 1
     jac_csr = jac.tocsr()
 
     result = least_squares(

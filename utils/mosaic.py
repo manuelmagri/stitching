@@ -1,9 +1,12 @@
-"""Assemblaggio del mosaico: bounding box del canvas e composizione first-wins.
+"""Assemblaggio del mosaico: bounding box del canvas e composizione hard-pick.
 
-Ogni pixel del canvas viene riempito dal PRIMO frame che lo copre, in ordine temporale.
-Frame 1 fa la base; ogni frame successivo aggiunge solo le porzioni non ancora coperte.
-Niente media, niente peso spaziale, niente blending — l'output e' una progressione pulita
-dal primo all'ultimo frame dell'intervallo.
+Due modalita' (selezionate da blend_mode):
+  - "first":  ogni pixel viene dal PRIMO frame che lo copre, in ordine temporale.
+  - "center": ogni pixel viene dal frame in cui quel pixel e' piu' vicino al CENTRO
+              dell'immagine sorgente (zona piu' nadirale, meno distorta).
+
+In entrambi i casi nessun blending: il pixel risultante e' quello di un singolo frame,
+quindi niente ghosting da pose imperfette.
 """
 import cv2
 import numpy as np
@@ -100,19 +103,52 @@ def assemble(
     transforms: list[np.ndarray],
     canvas_size: tuple[int, int],
     strip_h_px: int,
+    leg_first_indices: set[int] | None = None,
+    leg_last_indices: set[int] | None = None,
+    blend_mode: str = "first",
     progress=None,
 ) -> tuple[np.ndarray, np.ndarray]:
-    """First-wins su striscia centrale: ogni pixel viene dal PRIMO frame che lo copre.
+    """Hard-pick su striscia centrale: ogni pixel viene da UN solo frame, niente blending.
 
-    Niente blending, niente media pesata. Cosi' anche con GPS noise i pixel restano nitidi:
-    le linee di giunzione sono visibili come seam ma non c'e' ghosting da disallineamento.
+    blend_mode:
+      - "first":  vince il primo frame in ordine temporale che copre il pixel. Usa la
+                  striscia centrale (strip_h_px + estensioni di leg) per limitare
+                  ciascun frame alla sua zona piu' nadirale.
+      - "center": vince il frame in cui quel pixel e' piu' vicino al centro dell'immagine
+                  sorgente. Non usa la striscia: ogni frame contribuisce con tutto il suo
+                  footprint, ma il criterio sceglie comunque la zona piu' nadirale di
+                  qualche frame. Cosi' nessuna banda nera fra strisce non sovrapposte.
+
+    leg_first_indices / leg_last_indices: indici (in `transforms`) dei frame che sono
+    il primo / l'ultimo di un leg. In modalita' "first" il primo estende la striscia
+    verso il basso (zona dietro al drone, non coperta da altri frame), l'ultimo verso
+    l'alto (zona davanti). Senza queste estensioni la striscia centrale taglia a meta'
+    i frame di confine e appaiono gap neri fra leg consecutivi. Default: solo il primo
+    e ultimo del mosaico. Ignorati in modalita' "center".
 
     Ritorna (canvas BGR uint8, maschera bool dei pixel con contenuto).
     """
+    if blend_mode not in ("first", "center"):
+        raise ValueError(f"blend_mode non valido: {blend_mode!r}. Usa 'first' o 'center'.")
+
     canvas_w, canvas_h = canvas_size
     canvas = np.zeros((canvas_h, canvas_w, 3), dtype=np.uint8)
     filled = np.zeros((canvas_h, canvas_w), dtype=bool)
     n = len(transforms)
+
+    # In center-wins: per ogni pixel coperto, distanza (in pixel del frame sorgente)
+    # dal centro del frame che attualmente lo possiede. Inizializzata a +inf cosi'
+    # qualunque frame valido vince la prima volta.
+    dist_map: np.ndarray | None = None
+    dist_src_cache: tuple[tuple[int, int], np.ndarray] | None = None
+    BORDER_LARGE = 1e9  # valore "infinito" finito per il borderValue di warpPerspective
+    if blend_mode == "center":
+        dist_map = np.full((canvas_h, canvas_w), BORDER_LARGE, dtype=np.float32)
+
+    if leg_first_indices is None:
+        leg_first_indices = {0}
+    if leg_last_indices is None:
+        leg_last_indices = {n - 1}
 
     iterator = range(n)
     if progress is not None:
@@ -123,9 +159,15 @@ def assemble(
         if img is None:
             continue
         h, w = img.shape[:2]
-        extend_bot = i == 0
-        extend_top = i == n - 1
-        mask = _strip_mask(h, w, strip_h_px, extend_top, extend_bot)
+        if blend_mode == "center":
+            # In center-wins ogni frame contribuisce con TUTTO il suo footprint:
+            # il criterio "piu' nadirale" sceglie comunque la zona centrale, e
+            # cosi' il canvas non ha bande nere fra strisce non sovrapposte.
+            mask = np.full((h, w), 255, dtype=np.uint8)
+        else:
+            extend_bot = i in leg_first_indices
+            extend_top = i in leg_last_indices
+            mask = _strip_mask(h, w, strip_h_px, extend_top, extend_bot)
 
         corners = _warped_corners(transforms[i], w, h)
         x0 = max(int(np.floor(corners[:, 0].min())), 0)
@@ -147,10 +189,33 @@ def assemble(
         )
 
         valid = (warped.sum(axis=-1) > 0) & (warped_mask > 0)
-        filled_roi = filled[y0:y1, x0:x1]
         canvas_roi = canvas[y0:y1, x0:x1]
-        new_pixels = valid & ~filled_roi
-        canvas_roi[new_pixels] = warped[new_pixels]
-        filled_roi[new_pixels] = True
+        filled_roi = filled[y0:y1, x0:x1]
+
+        if blend_mode == "first":
+            new_pixels = valid & ~filled_roi
+            canvas_roi[new_pixels] = warped[new_pixels]
+            filled_roi[new_pixels] = True
+            continue
+
+        # center-wins: confronta la distanza-dal-centro del nuovo frame con quella dell'owner attuale.
+        if dist_src_cache is None or dist_src_cache[0] != (h, w):
+            yy, xx = np.mgrid[0:h, 0:w].astype(np.float32)
+            dist_src = np.sqrt((xx - w / 2.0) ** 2 + (yy - h / 2.0) ** 2)
+            dist_src_cache = ((h, w), dist_src)
+        dist_src = dist_src_cache[1]
+        dist_warped = cv2.warpPerspective(
+            dist_src,
+            M_local,
+            (x1 - x0, y1 - y0),
+            flags=cv2.INTER_LINEAR,
+            borderMode=cv2.BORDER_CONSTANT,
+            borderValue=BORDER_LARGE,
+        )
+        dist_roi = dist_map[y0:y1, x0:x1]
+        better = valid & (dist_warped < dist_roi)
+        canvas_roi[better] = warped[better]
+        dist_roi[better] = dist_warped[better]
+        filled_roi[better] = True
 
     return canvas, filled

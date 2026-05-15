@@ -67,6 +67,8 @@ def load_metadata(metadata_path: Path) -> list[dict]:
         )
 
     records.sort(key=lambda r: r["index"])
+    for vo_idx, r in enumerate(records):
+        r["vo_idx"] = vo_idx
     return records
 
 

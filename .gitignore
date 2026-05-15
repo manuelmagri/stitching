@@ -1,6 +1,7 @@
 # Cartelle "inutili"
 .venv/
 .vscode/
+.claude
 __pycache__/
 lib/__pycache__/
 utils/__pycache__/
@@ -9,6 +10,7 @@ legacy/
 # TEST - Data, immagini droni per test, output test, immagini senza distorsione, ecc.
 data/*
 immagini/immagini_drone/immagini_senza_distorsione/*
+immagini/immagini_drone/immagini_senza_distorsione_compresse/*
 immagini/immagini_drone/feature/*
 immagini/immagini_drone/match/*
 immagini/immagini_drone/DJI_202404081953_006_UgCS-VT3/

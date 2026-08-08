@@ -2,9 +2,8 @@ import glob
 import os
 import subprocess
 import cv2
-import numpy as np
 
-from preprocessing.extract_xmp import leggi_intrinseci_da_immagine
+from preprocessing._xmp import leggi_intrinseci
 
 def correggi_distorsione_cartella(input_dir, output_dir, exiftool_path):
     """Corregge la distorsione di tutte le .jpg di `input_dir` salvandole in `output_dir`.
@@ -20,12 +19,7 @@ def correggi_distorsione_cartella(input_dir, output_dir, exiftool_path):
 
     # Gli intrinseci sono identici per tutte le foto della stessa camera:
     # leggiamo l'XMP della prima e calcoliamo (newK, roi) una volta sola.
-    focal, cx, cy, dist_coeffs = leggi_intrinseci_da_immagine(immagini[0])
-    camera_matrix = np.array([
-        [focal, 0, cx],
-        [0, focal, cy],
-        [0, 0, 1],
-    ])
+    camera_matrix, dist_coeffs = leggi_intrinseci(immagini[0])
 
     sample = cv2.imread(immagini[0])
     if sample is None:

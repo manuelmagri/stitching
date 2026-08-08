@@ -1,46 +1,26 @@
-"""Preprocessing delle immagini drone DJI: lettura XMP, calibrazione,
-correzione della distorsione, estrazione dei metadati EXIF/IMU.
+"""Preprocessing delle immagini drone DJI.
 
-API pubblica del package (importabile come `from preprocessing import X`):
+Prepara i tre file che la pipeline consuma, piu' le immagini non distorte:
 
-    leggi_intrinseci_da_immagine(file_path)
-        -> (focal, cx, cy, dist_coeffs) letti dall'XMP DJI
+    create_calib.genera_calibrazione(immagine_riferimento, output_file)
+        -> data/calibration.json    camera matrix letta dall'XMP DJI
 
-    analizza_xmp(file_path)
-        -> stringa XMP grezza
+    create_metadata.genera_metadati(image_folder, output_file, exiftool_path, ...)
+        -> data/metadati.json       GPS, quota e assetto di ogni scatto
 
-    estrai_matrice_intrinseca(xmp_string)
-        -> (focal, cx, cy, dist_coeffs) parsando un XMP gia' letto
+    create_translations.genera_traslazioni(metadata_file, output_file)
+        -> data/translations.json   delta [est, nord] inter-frame, in metri
 
-    correggi_distorsione_cartella(input_dir, output_dir, exiftool_path)
-        applica cv2.undistort a tutte le .jpg di una cartella
+    undistort_image.correggi_distorsione_cartella(input_dir, output_dir, exiftool_path)
+        -> cartella di .jpg non distorte, e' l'input di main.py
 
-    genera_calibrazione(immagine_riferimento, output_dir, ...)
-        calibrazione di camera con intrinseci letti dall'XMP
+Calibrazione e metadati sono indipendenti; le traslazioni richiedono i metadati
+gia' scritti. Ogni modulo e' eseguibile da solo sui percorsi di default:
 
-    calibra_da_scacchiera(immagini_dir, output_dir, ...)
-        calibrazione di camera tramite scacchiera (path alternativo)
+    python -m preprocessing.create_calib
+    python -m preprocessing.create_metadata
+    python -m preprocessing.create_translations
+    python -m preprocessing.undistort_image
 
-    estrai_metadati_da_immagini(image_folder, output_file, exiftool_path, ...)
-        estrazione GPS / attitude / velocita' di volo via exiftool
+`_xmp` e' un helper interno (intrinseci letti dall'XMP), non fa parte dell'API.
 """
-
-from preprocessing.extract_xmp import (
-    analizza_xmp,
-    estrai_matrice_intrinseca,
-    leggi_intrinseci_da_immagine,
-)
-from preprocessing.undistort_image import correggi_distorsione_cartella
-from preprocessing.create_calib import genera_calibrazione
-from preprocessing.create_calib_scacchiera import calibra_da_scacchiera
-from preprocessing.extract_metadata import estrai_metadati_da_immagini
-
-__all__ = [
-    "analizza_xmp",
-    "estrai_matrice_intrinseca",
-    "leggi_intrinseci_da_immagine",
-    "correggi_distorsione_cartella",
-    "genera_calibrazione",
-    "calibra_da_scacchiera",
-    "estrai_metadati_da_immagini",
-]

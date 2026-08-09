@@ -1,7 +1,6 @@
 # Cartelle "inutili"
 .venv/
 .vscode/
-.claude/
 __pycache__/
 lib/__pycache__/
 utils/__pycache__/

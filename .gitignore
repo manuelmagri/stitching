@@ -2,9 +2,7 @@
 .venv/
 .vscode/
 __pycache__/
-lib/__pycache__/
-utils/__pycache__/
-*utils-scarti*/*
+*/__pycache__/
 
 # TEST - Data, immagini droni per test, output test, immagini senza distorsione, ecc.
 data/*

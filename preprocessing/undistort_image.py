@@ -3,7 +3,7 @@ import os
 import subprocess
 import cv2
 
-from preprocessing._xmp import leggi_intrinseci
+from preprocessing._xmp import parametri_rettifica
 
 def correggi_distorsione_cartella(input_dir, output_dir, exiftool_path):
     """Corregge la distorsione di tutte le .jpg di `input_dir` salvandole in `output_dir`.
@@ -17,19 +17,14 @@ def correggi_distorsione_cartella(input_dir, output_dir, exiftool_path):
 
     os.makedirs(output_dir, exist_ok=True)
 
-    # Gli intrinseci sono identici per tutte le foto della stessa camera:
-    # leggiamo l'XMP della prima e calcoliamo (newK, roi) una volta sola.
-    camera_matrix, dist_coeffs = leggi_intrinseci(immagini[0])
-
-    sample = cv2.imread(immagini[0])
-    if sample is None:
-        raise RuntimeError(f"Impossibile leggere {immagini[0]}")
-    h, w = sample.shape[:2]
-
-    new_camera_matrix, roi = cv2.getOptimalNewCameraMatrix(
-        camera_matrix, dist_coeffs, (w, h), 1, (w, h)
-    )
-    x, y, rw, rh = roi
+    # Gli intrinseci sono identici per tutte le foto della stessa camera: li deduciamo
+    # dalla prima, una volta sola. E' la stessa funzione che usa `create_calibration`,
+    # cosi' le immagini prodotte qui e la calibrazione scritta la' restano coerenti.
+    parametri = parametri_rettifica(immagini[0])
+    camera_matrix = parametri["camera_matrix"]
+    dist_coeffs = parametri["dist_coeffs"]
+    new_camera_matrix = parametri["new_camera_matrix"]
+    x, y, rw, rh = parametri["roi"]
 
     output_paths = []
     for src_path in immagini:

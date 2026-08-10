@@ -30,7 +30,7 @@ def parse_args(argv : list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         prog="create_metadata.py",
         description=("Descrizione"),
-        epilog=("Esempio:\n python preprocessing/create_metadata.py immagini/immagini_drone/cartella_volo"),
+        epilog=("Esempio:\n python preprocessing/create_metadata.py immagini/cartella_volo"),
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
 
@@ -75,5 +75,6 @@ def genera_metadati(image_folder, output_file, exiftool_path, chunk_size=10):
 
 
 # Run
-args = parse_args()
-genera_metadati(args.cartella, OUTPUT_FILE_PATH, EXIFTOOL_PATH)
+if __name__ == "__main__":
+    args = parse_args()
+    genera_metadati(args.cartella, OUTPUT_FILE_PATH, EXIFTOOL_PATH)

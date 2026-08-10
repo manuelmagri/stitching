@@ -1,108 +1,124 @@
-"""Scrittura del mosaico come GeoTIFF in EPSG:4326 (WGS84 lat/lon).
+"""Scrittura del mosaico come GeoTIFF in UTM, una banda alla volta.
 
-Strategia: il mosaico esiste in coordinate metriche UTM (origine + GSD). Si scrive prima in UTM
-come trasformata in memoria, poi rasterio.warp.reproject lo proietta in EPSG:4326. Se viene
-fornita una maschera alpha, l'output ha 4 bande (RGBA) e i pixel fuori dall'area mosaicata
-sono trasparenti invece che neri.
+Si scrive nel CRS proiettato in cui il mosaico e' gia' espresso, senza riproiettare in
+lat/lon. Una ortofoto in UTM ha pixel quadrati in metri, si misura sopra direttamente, ed
+e' la forma in cui questi prodotti normalmente circolano; chi ha bisogno di EPSG:4326 lo
+ottiene con un gdalwarp sul file. La riproiezione in memoria, che la versione precedente
+faceva banda per banda sull'array intero, su 1,27 gigapixel non sarebbe comunque stata
+sostenibile: allocava sorgente e destinazione per tre volte.
+
+L'alfa distingue i pixel effettivamente coperti da quelli lasciati vuoti ai bordi del
+riquadro, che altrimenti sarebbero neri opachi.
 """
 from pathlib import Path
 
+import cv2
 import numpy as np
 import rasterio
 from rasterio.crs import CRS
 from rasterio.enums import ColorInterp, Resampling
 from rasterio.transform import from_origin
-from rasterio.warp import calculate_default_transform, reproject
+from rasterio.windows import Window
 
 
 def write_geotiff(
-    mosaic_bgr: np.ndarray,
-    canvas_offset_px: tuple[int, int],
-    ref_origin_m: tuple[float, float],
+    output_path: Path,
+    canvas_size: tuple[int, int],
+    origin_m: tuple[float, float],
     gsd: float,
     utm_crs: str,
-    output_path: Path,
-    alpha_mask: np.ndarray | None = None,
-) -> None:
-    """mosaic_bgr: HxWx3 BGR uint8.
-    alpha_mask: HxW bool/uint8, True/255 dove c'e' contenuto. Se None il TIFF e' RGB a 3 bande.
-    ref_origin_m: (east, north) in UTM del pixel (0,0).
-    gsd: m/px.
-    """
-    height, width = mosaic_bgr.shape[:2]
-    east0, north0 = ref_origin_m
-    transform_utm = from_origin(east0, north0, gsd, gsd)
-    src_crs = CRS.from_string(utm_crs)
-    dst_crs = CRS.from_epsg(4326)
+    bands,
+    build_overviews: bool = True,
+    preview_max_side: int = 0,
+) -> np.ndarray | None:
+    """Scrive il mosaico consumando il generatore `bands`.
 
-    rgb = mosaic_bgr[..., ::-1]  # BGR -> RGB
-    dst_transform, dst_w, dst_h = calculate_default_transform(
-        src_crs, dst_crs, width, height, *_bounds(transform_utm, width, height)
+    `bands` produce (riga_iniziale, banda BGR uint8, maschera booleana), come
+    `utils.compositing.compose_bands`. `origin_m` e' la coordinata UTM del pixel (0, 0).
+
+    Con `preview_max_side > 0` costruisce anche una miniatura mentre le bande passano, e la
+    restituisce: e' l'unico modo ragionevole di guardare il risultato, visto che un JPEG a
+    piena risoluzione qui non e' un'opzione.
+
+    Le piramidi interne servono a chi apre il file: senza, un GIS deve leggere tutti i
+    pixel per disegnare una vista d'insieme.
+    """
+    canvas_w, canvas_h = canvas_size
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+
+    fattore = min(1.0, preview_max_side / max(canvas_w, canvas_h)) if preview_max_side else 0.0
+    anteprima = (
+        np.zeros((max(int(canvas_h * fattore), 1), max(int(canvas_w * fattore), 1), 3), np.uint8)
+        if fattore
+        else None
     )
 
-    use_alpha = alpha_mask is not None
-    n_bands = 4 if use_alpha else 3
-
-    output_path.parent.mkdir(parents=True, exist_ok=True)
-    profile = {
+    profilo = {
         "driver": "GTiff",
-        "height": dst_h,
-        "width": dst_w,
-        "count": n_bands,
+        "width": canvas_w,
+        "height": canvas_h,
+        "count": 4,
         "dtype": "uint8",
-        "crs": dst_crs,
-        "transform": dst_transform,
+        "crs": CRS.from_string(utm_crs),
+        "transform": from_origin(origin_m[0], origin_m[1], gsd, gsd),
         "compress": "lzw",
         "tiled": True,
         "blockxsize": 256,
         "blockysize": 256,
+        "photometric": "rgb",
+        "BIGTIFF": "IF_SAFER",
     }
-    if use_alpha:
-        profile["photometric"] = "rgb"
 
-    with rasterio.open(output_path, "w", **profile) as dst:
-        # Imposta colorinterp PRIMA di scrivere le bande perche' GDAL associ correttamente
-        # il tag EXTRA_SAMPLES alla banda alpha nel TIFF.
-        if use_alpha:
-            dst.colorinterp = (
-                ColorInterp.red,
-                ColorInterp.green,
-                ColorInterp.blue,
-                ColorInterp.alpha,
-            )
+    with rasterio.open(output_path, "w", **profilo) as dst:
+        # Va impostato PRIMA di scrivere, perche' GDAL associ il tag EXTRA_SAMPLES
+        # alla quarta banda invece di trattarla come un canale generico.
+        dst.colorinterp = (
+            ColorInterp.red,
+            ColorInterp.green,
+            ColorInterp.blue,
+            ColorInterp.alpha,
+        )
 
-        for band in range(3):
-            src_band = np.ascontiguousarray(rgb[:, :, band])
-            dst_band = np.zeros((dst_h, dst_w), dtype=np.uint8)
-            reproject(
-                source=src_band,
-                destination=dst_band,
-                src_transform=transform_utm,
-                src_crs=src_crs,
-                dst_transform=dst_transform,
-                dst_crs=dst_crs,
-                resampling=Resampling.bilinear,
-            )
-            dst.write(dst_band, band + 1)
+        for riga, banda, maschera in bands:
+            altezza = banda.shape[0]
+            finestra = Window(0, riga, canvas_w, altezza)
+            rgb = banda[..., ::-1]  # BGR -> RGB
+            for k in range(3):
+                dst.write(np.ascontiguousarray(rgb[:, :, k]), k + 1, window=finestra)
+            dst.write(maschera.astype(np.uint8) * 255, 4, window=finestra)
 
-        if use_alpha:
-            alpha_src = (np.asarray(alpha_mask).astype(bool).astype(np.uint8) * 255)
-            dst_alpha = np.zeros((dst_h, dst_w), dtype=np.uint8)
-            reproject(
-                source=np.ascontiguousarray(alpha_src),
-                destination=dst_alpha,
-                src_transform=transform_utm,
-                src_crs=src_crs,
-                dst_transform=dst_transform,
-                dst_crs=dst_crs,
-                resampling=Resampling.bilinear,
-            )
-            dst.write(dst_alpha, 4)
+            if anteprima is not None:
+                # Entrambi gli estremi vanno calcolati dalle righe ASSOLUTE del canvas.
+                # Ricavare la fine da `y0 + altezza*fattore` fa perdere una riga ogni volta
+                # che i due arrotondamenti cadono da parti opposte, e nell'anteprima
+                # comparivano righe nere ai confini fra bande che nel GeoTIFF non c'erano.
+                y0 = int(riga * fattore)
+                y1 = min(int((riga + altezza) * fattore), anteprima.shape[0])
+                if y1 > y0:
+                    anteprima[y0:y1] = cv2.resize(
+                        banda, (anteprima.shape[1], y1 - y0), interpolation=cv2.INTER_AREA
+                    )
+
+        if build_overviews:
+            dst.build_overviews([2, 4, 8, 16, 32], Resampling.average)
+            dst.update_tags(ns="rio_overview", resampling="average")
+
+    return anteprima
 
 
-def _bounds(transform, width: int, height: int):
-    left = transform.c
-    top = transform.f
-    right = left + transform.a * width
-    bottom = top + transform.e * height
-    return left, bottom, right, top
+def canvas_origin_utm(
+    reference_origin_m: tuple[float, float],
+    canvas_offset_px: tuple[int, int],
+    gsd: float,
+) -> tuple[float, float]:
+    """Coordinata UTM del pixel (0, 0) del canvas finale.
+
+    `compute_canvas` trasla le pose perche' il riquadro parta dall'origine; l'offset che
+    restituisce dice di quanto, e va riportato sulle coordinate del mondo. La y del canvas
+    cresce verso sud, quindi il nord va sottratto.
+    """
+    off_x, off_y = canvas_offset_px
+    return (
+        reference_origin_m[0] + off_x * gsd,
+        reference_origin_m[1] - off_y * gsd,
+    )

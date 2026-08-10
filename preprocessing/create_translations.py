@@ -52,4 +52,5 @@ def genera_traslazioni(metadata_file, output_file):
 
 
 # Run
-genera_traslazioni(METADATA_FILE_PATH, OUTPUT_TRANSLATIONS_FILE_PATH)
+if __name__ == "__main__":
+    genera_traslazioni(METADATA_FILE_PATH, OUTPUT_TRANSLATIONS_FILE_PATH)

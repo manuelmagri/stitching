@@ -3,9 +3,11 @@
 .vscode/
 __pycache__/
 */__pycache__/
+*.claude/
 
 # TEST - Data, immagini droni per test, output test, immagini senza distorsione, ecc.
 data/*
 immagini/immagini_drone/immagini_senza_distorsione/*
 immagini/immagini_drone/*
+immagini/*
 output/*

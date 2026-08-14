@@ -28,6 +28,40 @@ _FLAGS = {
     8: cv2.IMREAD_REDUCED_COLOR_8,
 }
 
+# Lato lungo minimo a cui stimare le pose. E' l'unica costante di taratura rimasta nella
+# pipeline, e va letta per quello che e': un valore MISURATO su due voli, non dedotto.
+# Contando i vincoli che sopravvivono al matching:
+#
+#     DJI    (4909 px)   riduzione 4 -> 1228 px, 37,0 mm/px   96 vincoli su 123 coppie
+#     Altum  (1591 px)   riduzione 1 -> 1591 px,  4,3 mm/px   19 vincoli,  0 fra passate
+#                        riduzione 2 ->  795 px,  8,6 mm/px   23 vincoli,  3 fra passate
+#                        riduzione 4 ->  397 px, 17,3 mm/px   23 vincoli,  3 fra passate
+#
+# A piena risoluzione l'erba a 4,3 mm/px e' rumore: i descrittori si agganciano a niente, e
+# fra le passate non passa un solo vincolo. Ridurre la media via e lascia le strutture
+# grandi. Perche' entrambi i voli scelgano la riduzione giusta il valore deve stare fra 614
+# e 795 -- una finestra larga il 25% -- e 700 ne sta in mezzo.
+#
+# Non e' una legge fisica: la scala a cui un terreno ha struttura dipende dal terreno, e su
+# un volo molto diverso questo numero puo' sbagliare. Il sintomo pero' e' immediato, ed e'
+# gia' stampato: componenti e cicli indipendenti sui vincoli SUPERSTITI. Un grafo che si
+# spezza mentre le impronte si sovrappongono e' quasi sempre questo.
+LATO_LUNGO_MINIMO = 700
+
+
+def reduction_for(image_size: tuple[int, int], min_long_side: int = LATO_LUNGO_MINIMO) -> int:
+    """La riduzione piu' spinta che lascia il lato lungo sopra `min_long_side`.
+
+    Si fissa la RISOLUZIONE DI LAVORO e non il divisore, che tarato a 4 varrebbe per una
+    camera sola: e' la stessa parametrizzazione che `compositing.plan` usa con
+    `seam_megapix`.
+    """
+    lungo = max(image_size)
+    for riduzione in sorted(_FLAGS, reverse=True):
+        if lungo / riduzione >= min_long_side:
+            return riduzione
+    return 1
+
 
 class FrameReader:
     """Lettore a finestra scorrevole su una lista di percorsi.
@@ -57,9 +91,6 @@ class FrameReader:
         self._cache: OrderedDict[int, np.ndarray] = OrderedDict()
         self._size: tuple[int, int] | None = None
         self.letture = 0
-
-    def __len__(self) -> int:
-        return len(self.paths)
 
     @property
     def image_size(self) -> tuple[int, int]:

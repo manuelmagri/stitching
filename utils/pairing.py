@@ -61,6 +61,37 @@ def candidate_pairs(
     return sorted((i, j, sovrapposizioni[(i, j)]) for i, j in tenute)
 
 
+def pairs_holding_together(
+    quads: np.ndarray,
+    start_overlap: float,
+    floor: float = 0.05,
+    step: float = 0.05,
+    max_neighbors: int = 6,
+) -> tuple[list[tuple[int, int, float]], float]:
+    """Le coppie alla soglia piu' alta che tiene il volo in un pezzo solo, e quella soglia.
+
+    Sotto quale sovrapposizione due scatti non vale piu' la pena di accoppiarli non e' una
+    proprieta' della camera: e' una proprieta' del PIANO DI VOLO, e cambia da missione a
+    missione. Un volo fitto regge a soglia alta; uno pianificato con il 25% nominale di
+    sovrapposizione laterale, che a terra diventa 8-14% perche' cade tutta nella periferia
+    dei fotogrammi, no -- e a soglia alta le passate restano semplicemente scollegate.
+
+    Invece di scegliere un valore per sorgente si parte da `start_overlap` e si scende solo
+    se il grafo esce spezzato, perche' senza legami fra le passate le loro posizioni
+    reciproche restano indeterminate e nessun peso lo compensa. Un volo che tiene alla
+    soglia di partenza non si muove di un millimetro: la scaletta e' un rimedio, non una
+    ricerca del meglio.
+    """
+    soglia = start_overlap
+    coppie = candidate_pairs(quads, soglia, max_neighbors)
+    while (
+        len(connected_components(len(quads), coppie)) > 1 and soglia - step >= floor - 1e-9
+    ):
+        soglia = round(soglia - step, 6)
+        coppie = candidate_pairs(quads, soglia, max_neighbors)
+    return coppie, soglia
+
+
 def connected_components(n: int, pairs) -> list[list[int]]:
     """Componenti connesse del grafo delle coppie, dalla piu' grande alla piu' piccola.
 

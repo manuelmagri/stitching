@@ -20,12 +20,22 @@ def central_meridian_for(epsg: int) -> float:
     return (zone - 1) * 6.0 - 180.0 + 3.0
 
 
-def make_transformers(lat0: float, lon0: float):
-    epsg = utm_epsg_for(lat0, lon0)
-    utm_crs = f"EPSG:{epsg}"
+def transformers_for(utm_crs: str):
+    """I due transformer da e verso un CRS proiettato gia' scelto.
+
+    `make_transformers` la zona la sceglie; questa la riceve. Serve a chi un CRS ce l'ha
+    gia' dichiarato e deve solo restare dentro quello -- `main`, che adotta quello di
+    `Source.utm_crs` invece di ricavarsene uno per conto proprio.
+    """
     to_utm = pyproj.Transformer.from_crs("EPSG:4326", utm_crs, always_xy=True)
     to_wgs84 = pyproj.Transformer.from_crs(utm_crs, "EPSG:4326", always_xy=True)
-    return to_utm, to_wgs84, utm_crs
+    return to_utm, to_wgs84
+
+
+def make_transformers(lat0: float, lon0: float):
+    """I due transformer piu' il CRS, scegliendo la zona UTM da una posizione."""
+    utm_crs = f"EPSG:{utm_epsg_for(lat0, lon0)}"
+    return (*transformers_for(utm_crs), utm_crs)
 
 
 def gsd_meters_per_pixel(altitude_m: float, focal_px: float) -> float:

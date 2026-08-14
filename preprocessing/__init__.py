@@ -1,56 +1,38 @@
-"""Preprocessing delle immagini drone DJI.
+"""Dai file consegnati agli input che la pipeline consuma.
 
-Prepara i tre file che la pipeline consuma, piu' le immagini rettificate:
+Due catene, una per formato di consegna, che convergono sullo stesso contratto:
+fotogrammi rettangolari, nadirali, a pixel quadrati, tutti della stessa dimensione.
 
-    genera_calibrazione(immagine_riferimento, output_file)
-        -> data/calibration.json    intrinseci e dimensione delle immagini rettificate
+    scatti DJI grezzi + XMP                    ortofoto per scatto
+    ------------------------------------       -------------------
+    create_calibration    intrinseci           create_ortho_frames
+    undistort_images      pixel
+    create_metadata       telemetria
+    create_translations   odometria
 
-    genera_metadati(image_folder, output_file, exiftool_path, ...)
-        -> data/metadata.json       GPS, quota e assetto di ogni scatto
+La catena DJI va eseguita in quest'ordine, e i primi tre passi vogliono la cartella
+degli scatti ORIGINALI: la rettifica non ricopia il blocco XMP, quindi dopo di essa
+l'assetto non e' piu' leggibile. Puntare uno dei tre su una cartella gia' rettificata
+fallisce subito, con un messaggio che dice questo.
 
-    genera_traslazioni(metadata_file, output_file)
-        -> data/translations.json   delta [est, nord] inter-frame, in metri
-
-    correggi_distorsione_cartella(input_dir, output_dir, exiftool_path)
-        -> cartella di .jpg rettificate, e' l'input di main.py
-
-Vincoli d'ordine: le traslazioni richiedono i metadati gia' scritti; la calibrazione
-va rigenerata ogni volta che si rifa' la rettifica, perche' descrive le immagini
-prodotte da quella (focale, centro ottico e dimensione cambiano col ritaglio).
-Metadati e rettifica sono invece indipendenti fra loro.
-
-Ogni modulo e' eseguibile da solo. Va invocato con -m e dalla radice del progetto,
-perche' gli import interni sono assoluti (`preprocessing.<modulo>`):
-
-    python -m preprocessing.create_calibration <scatto_originale.JPG>
-    python -m preprocessing.create_metadata <cartella_volo>
-    python -m preprocessing.create_translations
-    python -m preprocessing.undistort_image
-
-`_xmp` e' un helper interno (intrinseci XMP e parametri di rettifica), non fa parte
-dell'API.
+I percorsi dei file di scambio si dichiarano qui una volta sola, e li importa sia chi
+li scrive (questi script) sia chi li legge (`utils.source_exif`): finche' stanno in un
+posto solo, produttore e consumatore non possono divergere.
 """
-import importlib as _importlib
+from pathlib import Path
 
-# I quattro nomi sopra sono raggiungibili anche da qui (`from preprocessing import
-# genera_calibrazione`), ma vengono risolti solo quando si usano, non all'import del
-# package. Importarli subito renderebbe ogni `python -m preprocessing.<modulo>` un
-# doppio caricamento -- una volta come sottomodulo tirato dentro da qui, una come
-# __main__ -- e runpy lo segnala con un RuntimeWarning a ogni invocazione.
-_API = {
-    "genera_calibrazione": "preprocessing.create_calibration",
-    "genera_metadati": "preprocessing.create_metadata",
-    "genera_traslazioni": "preprocessing.create_translations",
-    "correggi_distorsione_cartella": "preprocessing.undistort_image",
-}
+ROOT = Path(__file__).resolve().parent.parent
+DATA_DIR = ROOT / "data"
+EXIFTOOL = ROOT / "exiftool-13.53_64" / "exiftool.exe"
+
+CALIBRATION_FILE = DATA_DIR / "calibration.json"
+METADATA_FILE = DATA_DIR / "metadata.json"
+TRANSLATIONS_FILE = DATA_DIR / "translations.json"
 
 
-def __getattr__(name):
-    modulo = _API.get(name)
-    if modulo is None:
-        raise AttributeError(f"il package {__name__!r} non espone {name!r}")
-    return getattr(_importlib.import_module(modulo), name)
-
-
-def __dir__():
-    return sorted([*globals(), *_API])
+def scatti(cartella: Path) -> list[Path]:
+    """Le .jpg di una cartella, in ordine di nome. Alza se non ce ne sono."""
+    immagini = sorted(p for p in Path(cartella).iterdir() if p.suffix.lower() == ".jpg")
+    if not immagini:
+        raise FileNotFoundError(f"Nessuna .jpg in {cartella}")
+    return immagini

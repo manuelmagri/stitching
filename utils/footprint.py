@@ -4,16 +4,14 @@ E' il cuore dell'idea: sapendo posizione, rotta e quota si sa in anticipo che co
 ogni scatto, quindi si tentano solo gli accoppiamenti geometricamente plausibili invece
 di provarli tutti.
 
-L'impronta viene derivata dalla POSA, non ricalcolata da posizione e rotta. Le due strade
-darebbero lo stesso risultato solo finche' nessuno tocca le convenzioni di segno, e questa
-non puo' sfasarsi: e' letteralmente il rettangolo dell'immagine trasformato dalla posa.
-Per la stessa ragione tutto qui lavora in pixel canvas invece che in metri -- la
-sovrapposizione e' una frazione, quindi le unita' si semplificano e non c'e' nessuna
-conversione da sbagliare.
+L'impronta viene derivata dalla POSA, non ricalcolata da posizione e rotta: cosi' non puo'
+sfasarsi rispetto alle convenzioni di segno usate altrove, perche' e' letteralmente il
+rettangolo dell'immagine trasformato dalla posa. Per la stessa ragione si lavora in pixel
+canvas e non in metri -- la sovrapposizione e' una frazione, quindi le unita' si
+semplificano.
 
-Vale finche' la camera guarda il nadir e il terreno e' pianeggiante: sotto queste ipotesi
-l'impronta e' il rettangolo dell'immagine, scalato e ruotato. `utils.flight` esclude gia'
-gli scatti in cui il gimbal non era al nadir.
+Vale finche' la camera guarda il nadir e il terreno e' pianeggiante; `utils.flight` esclude
+gia' gli scatti in cui il gimbal non era al nadir.
 """
 import numpy as np
 

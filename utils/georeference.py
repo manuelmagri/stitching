@@ -12,12 +12,9 @@ quel tanto, senza nessun sintomo evidente. La seconda e' che assorbe l'errore di
 residuo di barometro e odometria, misurato allo 0,39% sul volo di prova.
 
 Applicare una similarita' globale a tutte le pose non reintroduce il GPS nello stitching:
-sposta, ruota e scala il risultato in blocco, e non puo' cambiarne la forma. Il confine
-resta quello voluto.
-
-In cambio si ottiene una cosa che con il GPS dentro l'ottimizzazione sarebbe impossibile:
-il residuo del fit e' una misura indipendente della qualita' della ricostruzione, perche'
-il GPS non ha contribuito a produrla.
+sposta, ruota e scala il risultato in blocco, e non puo' cambiarne la forma. In cambio il
+residuo del fit e' una misura indipendente della qualita' della ricostruzione, perche' il
+GPS non ha contribuito a produrla.
 """
 import math
 
@@ -53,6 +50,16 @@ def similarity_umeyama(src: np.ndarray, dst: np.ndarray) -> np.ndarray:
     return A
 
 
+def expected_rotation_deg(lat: float, lon: float, grid_north: bool) -> float:
+    """Quanta rotazione il fit dovrebbe assorbire, dato com'e' orientato il frame locale.
+
+    Un frame costruito sulla bussola e' in nord VERO e deve ancora scontare la convergenza
+    del meridiano; uno costruito direttamente in UTM e' gia' in nord griglia e non deve
+    scontare nulla. Il segno meno e' il verso della y del canvas.
+    """
+    return 0.0 if grid_north else -meridian_convergence_deg(lat, lon)
+
+
 def gps_targets_px(
     records: list[dict],
     to_utm,
@@ -82,15 +89,21 @@ def fit_to_gps(
     centers_px: np.ndarray,
     targets_px: np.ndarray,
     gsd_canvas: float,
-    lat: float,
-    lon: float,
+    expected_rotation_deg: float,
     outlier_sigma: float = 4.0,
 ) -> tuple[np.ndarray, dict]:
     """Similarita' 3x3 dal canvas locale al canvas allineato a UTM, piu' la diagnostica.
 
+    `expected_rotation_deg` e' quanta rotazione ci si aspetta che il fit debba assorbire,
+    e serve solo da controllo: il residuo fra questa e quella misurata dice se il frame
+    locale era orientato come si credeva. Chi costruisce il frame sulla bussola misura il
+    nord VERO e deve aspettarsi la convergenza del meridiano (col segno cambiato, perche'
+    il canvas ha y verso sud, quindi una rotazione oraria nel mondo appare antioraria
+    qui); chi lo costruisce direttamente in UTM e' gia' in nord griglia e deve aspettarsi
+    zero.
+
     Una seconda passata esclude i fix GPS che si discostano oltre `outlier_sigma` deviazioni
-    robuste, cosi' un singolo fix sbagliato non trascina l'intero mosaico. Con
-    `outlier_sigma = 0` il rigetto e' disattivato.
+    robuste, cosi' un singolo fix sbagliato non trascina l'intero mosaico.
     """
     A = similarity_umeyama(centers_px, targets_px)
 
@@ -100,7 +113,7 @@ def fit_to_gps(
 
     scarti = residui(A)
     tenuti = np.ones(len(scarti), dtype=bool)
-    if outlier_sigma > 0 and len(scarti) > 8:
+    if len(scarti) > 8:
         mediana = float(np.median(scarti))
         mad = float(np.median(np.abs(scarti - mediana))) * 1.4826
         if mad > 0:
@@ -113,15 +126,12 @@ def fit_to_gps(
 
     rotazione = math.degrees(math.atan2(A[1, 0], A[0, 0]))
     scala = float(math.hypot(A[0, 0], A[1, 0]))
-    attesa = meridian_convergence_deg(lat, lon)
 
     info = {
         "rotation_deg": rotazione,
         "scale": scala,
-        "convergence_deg": attesa,
-        # Il canvas ha y verso sud, quindi una rotazione oraria nel mondo appare
-        # antioraria qui: e' il segno opposto della convergenza a doversi ritrovare.
-        "rotation_residual_deg": rotazione + attesa,
+        "expected_rotation_deg": expected_rotation_deg,
+        "rotation_residual_deg": rotazione - expected_rotation_deg,
         "rms_m": float(np.sqrt((scarti[tenuti] ** 2).mean()) * gsd_canvas),
         "median_m": float(np.median(scarti[tenuti]) * gsd_canvas),
         "max_m": float(scarti[tenuti].max() * gsd_canvas),

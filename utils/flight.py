@@ -35,26 +35,22 @@ def _yaw_diff(a: float, b: float) -> float:
     return (a - b + 180.0) % 360.0 - 180.0
 
 
-def dominant_axis_deg(records: list[dict]) -> tuple[float, float]:
-    """Direzione dominante delle passate, modulo 180 gradi, e quanto e' marcata.
+def dominant_axis_deg(records: list[dict]) -> float:
+    """Direzione dominante delle passate, modulo 180 gradi.
 
     Raddoppiando gli angoli, due rotte opposte diventano lo stesso angolo, quindi la media
     vettoriale degli angoli raddoppiati da' l'asse del volo senza farsi confondere dal
-    verso di percorrenza. Il secondo valore e' la lunghezza del vettore medio, fra 0 e 1:
-    vicino a 1 il volo e' a greca, vicino a 0 non ha un asse dominante (per esempio una
-    spirale) e la segmentazione in passate non ha senso.
+    verso di percorrenza.
     """
     if not records:
-        return 0.0, 0.0
+        return 0.0
 
     doppi = np.radians([r["flight_yaw_deg"] for r in records]) * 2.0
-    medio = np.mean(np.exp(1j * doppi))
-    return math.degrees(np.angle(medio)) / 2.0, float(abs(medio))
+    return math.degrees(np.angle(np.mean(np.exp(1j * doppi)))) / 2.0
 
 
 def mark_curves(
     records: list[dict],
-    axis_deg: float | None = None,
     yaw_tolerance_deg: float = 15.0,
     nadir_tolerance_deg: float = 3.0,
 ) -> dict:
@@ -69,8 +65,7 @@ def mark_curves(
     quelli che lo percorrono al contrario, ed e' None sugli scatti in virata. E' quello
     che separa due passate adiacenti, che sono contigue nel tempo ma opposte nel verso.
     """
-    if axis_deg is None:
-        axis_deg, _ = dominant_axis_deg(records)
+    axis_deg = dominant_axis_deg(records)
 
     for record in records:
         scarto = _yaw_diff(record["flight_yaw_deg"], axis_deg)
@@ -85,16 +80,17 @@ def mark_curves(
         if record["is_curve"]:
             record["heading"] = None
 
-    in_curva = [r["index"] for r in records if r["is_curve"]]
+    in_curva = sum(1 for r in records if r["is_curve"])
     return {
         "axis_deg": axis_deg,
-        "curve": len(in_curva),
-        "straight": len(records) - len(in_curva),
-        "curve_indices": in_curva,
+        "curve": in_curva,
+        "straight": len(records) - in_curva,
     }
 
 
-def group_into_legs(records: list[dict], min_frames: int = 5) -> list[dict]:
+def group_into_legs(
+    records: list[dict], positions_m: np.ndarray, min_extent_m: float
+) -> list[dict]:
     """Passate: sequenze massimali di scatti non in virata con lo stesso `heading`.
 
     Ogni passata e' un dict con `frames` (indici in `records`, in ordine temporale) e
@@ -106,9 +102,13 @@ def group_into_legs(records: list[dict], min_frames: int = 5) -> list[dict]:
     adiacenti non regge: senza GPS e' l'unica rete di sicurezza rimasta, ed e' `utils.poses`
     a usarla, sommando i delta attraverso la virata.
 
-    Le sequenze piu' corte di `min_frames` vengono riassorbite fra le virate: un paio di
-    scatti isolati a meta' di una inversione non sono una passata, e trattarli come tale
-    creerebbe passate spurie che poi si porterebbero dietro vincoli inaffidabili.
+    Una sequenza corta a meta' di una inversione non e' una passata, e trattarla come tale
+    creerebbe passate spurie con vincoli inaffidabili. La domanda giusta pero' non e'
+    quanti scatti contenga -- cinque scatti su un volo da ottocento e cinque su uno da
+    venti non vogliono dire la stessa cosa -- ma se COPRA TERRENO NUOVO: si tiene la
+    sequenza che si estende per almeno `min_extent_m`, tipicamente l'impronta a terra di un
+    singolo scatto. Cosi' il criterio e' lo stesso su qualunque volo, e non c'e' una
+    costante da ritarare quando cambia la camera.
     """
     legs: list[dict] = []
     corrente: list[int] = []
@@ -133,13 +133,24 @@ def group_into_legs(records: list[dict], min_frames: int = 5) -> list[dict]:
 
     tenute = []
     for leg in legs:
-        if len(leg["frames"]) >= min_frames:
+        # Il minimo di tre scatti non e' una taratura ma una condizione di forma: due
+        # scatti non sono una passata, non stabiliscono una direzione, e se fra i due c'e'
+        # un salto -- un volo interrotto e ripreso altrove -- l'estensione da sola li
+        # promuove a passata lunghissima. Visto succedere su un volo con un salto di 133 m.
+        if len(leg["frames"]) >= 3 and leg_extent_m(positions_m, leg["frames"]) >= min_extent_m:
             tenute.append(leg)
             continue
         for i in leg["frames"]:
             records[i]["is_curve"] = True
             records[i]["heading"] = None
     return tenute
+
+
+def leg_extent_m(positions_m: np.ndarray, leg_frames: list[int]) -> float:
+    """Distanza fra il primo e l'ultimo scatto di una sequenza, in metri."""
+    if len(leg_frames) < 2:
+        return 0.0
+    return float(np.linalg.norm(positions_m[leg_frames[-1]] - positions_m[leg_frames[0]]))
 
 
 def subsample_leg(

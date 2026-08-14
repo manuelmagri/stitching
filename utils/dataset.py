@@ -1,6 +1,6 @@
 """Caricamento degli input: calibrazione, metadati di volo, percorsi delle immagini.
 
-La calibrazione descrive le immagini RETTIFICATE prodotte da `preprocessing.undistort_image`,
+La calibrazione descrive le immagini RETTIFICATE prodotte da `preprocessing.undistort_images`,
 non gli scatti originali: focale, centro ottico e dimensione cambiano col ritaglio.
 `verify_image_size` confronta la dimensione dichiarata con i file su disco e fallisce
 subito se non corrispondono, perche' la focale e' l'unico numero da cui dipende la scala
@@ -75,10 +75,6 @@ def _parse_signed_number(value) -> float:
     return float(str(value).replace("+", "").strip())
 
 
-def _parse_altitude(value) -> float:
-    return float(str(value).split()[0])
-
-
 def load_records(metadata_path: Path) -> list[dict]:
     """Un record per scatto, ordinati per indice di frame.
 
@@ -108,14 +104,9 @@ def load_records(metadata_path: Path) -> list[dict]:
                 "index": int(match.group(1)),
                 "lat": lat,
                 "lon": lon,
-                "altitude_m": _parse_altitude(entry["EXIF:GPSAltitude"]),
                 "relative_alt_m": _parse_signed_number(entry["XMP:RelativeAltitude"]),
-                "gimbal_yaw_deg": _parse_signed_number(entry["XMP:GimbalYawDegree"]),
                 "gimbal_pitch_deg": _parse_signed_number(entry["XMP:GimbalPitchDegree"]),
-                "gimbal_roll_deg": _parse_signed_number(entry["XMP:GimbalRollDegree"]),
                 "flight_yaw_deg": _parse_signed_number(entry["XMP:FlightYawDegree"]),
-                "flight_pitch_deg": _parse_signed_number(entry["XMP:FlightPitchDegree"]),
-                "flight_roll_deg": _parse_signed_number(entry["XMP:FlightRollDegree"]),
             }
         )
 
@@ -169,12 +160,9 @@ def select_range(
 
 
 def altitude_m(record: dict) -> float:
-    """Quota da usare per il GSD: la barometrica relativa, che e' la piu' stabile.
+    """Quota da usare per il GSD: la barometrica relativa, non la GPS.
 
     Su un volo di prova RelativeAltitude ha deviazione standard 0,05 m su 835 scatti,
-    contro 0,26 m di GPSAltitude. Si ripiega sulla GPS solo se la relativa manca.
+    contro 0,26 m di GPSAltitude.
     """
-    relative = record.get("relative_alt_m")
-    if relative is not None:
-        return abs(float(relative))
-    return abs(float(record["altitude_m"]))
+    return abs(float(record["relative_alt_m"]))

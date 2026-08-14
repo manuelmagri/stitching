@@ -1,8 +1,7 @@
 """Corrispondenze fra descrittori e stima della similarita' che lega due scatti.
 
 Quale coppia tentare lo decide `utils.pairing` dalla geometria; qui si lavora solo sulle
-immagini. La coppia serve a stimare una trasformazione, non a produrre un incollaggio
-intermedio: il mosaico e' una fase separata, a valle delle pose.
+immagini, e il risultato e' una trasformazione, non un incollaggio.
 
 Sulle passate adiacenti di una greca le immagini sono capovolte l'una rispetto all'altra,
 perche' le rotte differiscono di 180 gradi. I descrittori ORB sono invarianti per
@@ -80,30 +79,6 @@ def similarity_from_matches(
     return H, n_inlier
 
 
-def seed_disagreement_px(
-    H: np.ndarray,
-    M_i: np.ndarray,
-    M_j: np.ndarray,
-    image_size: tuple[int, int],
-) -> float:
-    """Massimo scarto, in pixel, fra la similarita' stimata e quella prevista dal seed.
-
-    Le pose iniziali prevedono che i pixel di i finiscano su j attraverso `inv(M_j) @ M_i`.
-    Se la stima fotografica se ne discosta di molto piu' dell'incertezza del seed, si
-    tratta quasi sempre di un aggancio su tessitura ripetitiva, e vale la pena scartarla:
-    un vincolo sbagliato pesato con la radice dei suoi inlier fa piu' danno di un vincolo
-    mancante.
-    """
-    w, h = image_size
-    corners = np.array(
-        [[0.0, 0.0, 1.0], [w, 0.0, 1.0], [w, h, 1.0], [0.0, h, 1.0]], dtype=np.float64
-    )
-    previsto = np.linalg.inv(M_j) @ M_i
-    a = (corners @ np.asarray(H, dtype=np.float64).T)[:, :2]
-    b = (corners @ previsto.T)[:, :2]
-    return float(np.linalg.norm(a - b, axis=1).max())
-
-
 def agrees_with_seed(
     H: np.ndarray,
     M_i: np.ndarray,
@@ -113,10 +88,23 @@ def agrees_with_seed(
 ) -> bool:
     """Se la similarita' stimata sia compatibile con le pose iniziali.
 
+    Le pose iniziali prevedono che i pixel di i finiscano su j attraverso `inv(M_j) @ M_i`.
+    Se la stima fotografica se ne discosta di molto piu' dell'incertezza del seed, si
+    tratta quasi sempre di un aggancio su tessitura ripetitiva, e vale la pena scartarla:
+    un vincolo sbagliato pesato con la radice dei suoi inlier fa piu' danno di un vincolo
+    mancante.
+
     `tolerance` e' espressa in frazioni della diagonale dell'immagine, cosi' vale a
     qualunque risoluzione. Il valore di default e' largo di proposito: serve a scartare gli
-    agganci assurdi su tessitura ripetitiva, non a imporre il seed alle immagini, che sono
-    la misura piu' precisa che abbiamo.
+    agganci assurdi, non a imporre il seed alle immagini, che sono la misura piu' precisa
+    che abbiamo.
     """
     w, h = image_size
-    return seed_disagreement_px(H, M_i, M_j, image_size) <= tolerance * float(np.hypot(w, h))
+    corners = np.array(
+        [[0.0, 0.0, 1.0], [w, 0.0, 1.0], [w, h, 1.0], [0.0, h, 1.0]], dtype=np.float64
+    )
+    previsto = np.linalg.inv(M_j) @ M_i
+    a = (corners @ np.asarray(H, dtype=np.float64).T)[:, :2]
+    b = (corners @ previsto.T)[:, :2]
+    scarto = float(np.linalg.norm(a - b, axis=1).max())
+    return scarto <= tolerance * float(np.hypot(w, h))

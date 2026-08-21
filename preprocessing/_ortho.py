@@ -47,8 +47,59 @@ def _valid_mask(image_bgr: np.ndarray) -> np.ndarray:
     return (image_bgr.any(axis=2)).astype(np.uint8)
 
 
+def _imread_senza_avvisi(path: Path) -> np.ndarray | None:
+    """`cv2.imread`, con spenti gli avvisi che libtiff emette sui tag GeoTIFF.
+
+    OpenCV apre il file con la propria libtiff, che i tag geografici non li conosce e ne
+    segnala uno per tag e per scatto: 33550 e 33922 sono il geotransform, 34735-34737 le
+    chiavi del CRS, 42112-42113 i metadati GDAL. Sono esattamente i tag che `leggi_tags` e
+    `leggi_ortofoto` leggono con rasterio, quindi l'avviso non annuncia nessun problema --
+    ma sono sette righe per scatto, centosessantuno su un volo da ventitre', e sommergono
+    le misure che questo passo stampa.
+
+    Il livello si rimette com'era subito dopo, perche' e' globale al processo: gli avvisi
+    di OpenCV che arrivano dal resto della pipeline devono restare visibili.
+    """
+    logging = cv2.utils.logging
+    precedente = logging.getLogLevel()
+    logging.setLogLevel(logging.LOG_LEVEL_ERROR)
+    try:
+        return cv2.imread(str(path), cv2.IMREAD_COLOR)
+    finally:
+        logging.setLogLevel(precedente)
+
+
+def leggi_pixel(path: Path) -> np.ndarray:
+    """I pixel di una ortofoto, letti al momento del bisogno.
+
+    Stanno FUORI da `leggi_ortofoto` di proposito, ed e' l'unica ragione per cui quella
+    funzione non li restituisce. Un'ortofoto Altum decompressa occupa 9,6 MB, e il pre-pass
+    deve guardare TUTTI gli scatti prima di poter decidere la dimensione del fotogramma:
+    tenere i pixel attaccati alla geometria significherebbe tenere in RAM il volo intero --
+    sui 61 scatti di `georef3` il processo passava da 68 a 858 MB -- per un array che serve
+    una volta sola, nel warp finale.
+
+    La regola del progetto e' la finestra scorrevole di `frames.FrameReader`, che di
+    fotogrammi ne tiene due. Qui ne basta uno.
+
+    Il prezzo e' un secondo decode per scatto, misurato in 40 ms: 0,9 s su `georef`, 2,5 s
+    su `georef3`, contro i 583 MB che restavano occupati. Cio' che sopravvive alla prima
+    passata scende a 275 MB su `georef3`, quasi tutti maschere -- 194 MB -- e quelle non si
+    possono lasciar cadere, perche' `dimensione_comune` le rilegge a ogni giro.
+    """
+    immagine = _imread_senza_avvisi(path)
+    if immagine is None:
+        raise ValueError(f"Impossibile leggere {path}")
+    return immagine
+
+
 def leggi_ortofoto(path: Path, to_utm, margine: int) -> dict:
-    """Tutto cio' che serve sapere di una ortofoto consegnata: pixel, geometria, tag.
+    """Tutto cio' che serve per MISURARE una ortofoto consegnata: geometria, maschera, tag.
+
+    I pixel no, quelli li da' `leggi_pixel` uno scatto per volta: la' il perche'. Il
+    risultato di questa funzione invece sopravvive per tutto il pre-pass, ed e' per questo
+    che conta cosa ci si mette dentro -- la maschera erosa serve davvero a tutti gli scatti
+    insieme, perche' `dimensione_comune` la riwarpa a ogni giro.
 
     L'impronta valida torna gia' EROSA di `margine` pixel, insieme al resto e non a parte:
     ogni misura che tocca il bordo -- il rettangolo di ripresa, la copertura del fotogramma
@@ -61,9 +112,7 @@ def leggi_ortofoto(path: Path, to_utm, margine: int) -> dict:
         if t.b or t.d:
             raise ValueError(f"{path.name}: geotransform con rotazione, non gestito")
 
-    immagine = cv2.imread(str(path), cv2.IMREAD_COLOR)
-    if immagine is None:
-        raise ValueError(f"Impossibile leggere {path}")
+    immagine = leggi_pixel(path)
 
     def px_to_utm(punti_px: np.ndarray) -> np.ndarray:
         lon = t.c + punti_px[:, 0] * t.a + punti_px[:, 1] * t.b
@@ -85,7 +134,7 @@ def leggi_ortofoto(path: Path, to_utm, margine: int) -> dict:
         "path": path,
         "size": size,
         "tags": tags,
-        "immagine": immagine,
+        # `immagine` non entra nel dict: qui muore, e i pixel si rileggono nel warp finale.
         "mask_erosa": cv2.erode(_valid_mask(immagine) * 255, nucleo),
         "px_to_utm": px_to_utm,
         "utm_to_px": utm_to_px,
@@ -266,9 +315,12 @@ def dimensione_comune(
 
     Il primo tentativo viene dal rettangolo circoscritto piu' piccolo del volo, ma
     `minAreaRect` CIRCOSCRIVE: eccede l'impronta la' dove quella non e' esattamente
-    rettangolare, e su qualche fotogramma resta una striscia di nodata larga una decina di
-    pixel. Invece di indovinare un margine si misura -- si prova, si guarda quanto manca,
-    si stringe di quel tanto -- e si paga solo qualche warp di maschere.
+    rettangolare, e la striscia di nodata che resta non e' il caso raro di qualche scatto
+    sfortunato. Misurato su `georef`: al primo tentativo, 1651x1231, sono sotto soglia
+    tutti e 23 gli scatti e il peggiore sta al 98,41% -- l'equivalente di una striscia
+    spessa una ventina di pixel su un lato. Invece di indovinare un margine si misura -- si
+    prova, si guarda quanto manca, si stringe di quel tanto -- e in tre giri si chiude a
+    1591x1171, sessanta pixel per asse, al prezzo di qualche warp di maschere.
 
     Vale la pena insistere: e' questa funzione che rende vero il contratto "fotogramma
     rettangolare senza nodata", e quindi che tiene `footprint`, `features` e `compositing`

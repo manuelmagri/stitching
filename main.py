@@ -196,31 +196,39 @@ def carica_volo(args: argparse.Namespace):
 
     _fase("Passate")
     statistiche = flight.mark_curves(records)
-    # Una sequenza e' una passata se copre almeno l'impronta di un singolo scatto: sotto,
-    # non aggiunge terreno e sono quasi sempre scatti dispersi dentro una inversione.
+    # Una passata deve coprire terreno nuovo: almeno l'impronta di un singolo scatto,
+    # oppure -- sui voli in cui nemmeno una ci arriva, i rilievi di corridoio -- almeno
+    # meta' della passata tipica del volo stesso.
     passate = flight.group_into_legs(records, posizioni, altezza_m)
-    if not passate:
-        raise SystemExit(
-            "Nessuna passata riconosciuta: il volo non ha una direzione dominante, "
-            "oppure il range di frame selezionato cade tutto dentro una virata."
+    if passate:
+        print(
+            f"  rotta dominante {statistiche['axis_deg']:.2f} gradi | "
+            f"{statistiche['curve']} scatti in virata | {len(passate)} passate "
+            f"da {min(len(l['frames']) for l in passate)} a "
+            f"{max(len(l['frames']) for l in passate)} scatti"
         )
-    print(
-        f"  rotta dominante {statistiche['axis_deg']:.2f} gradi | "
-        f"{statistiche['curve']} scatti in virata | {len(passate)} passate "
-        f"da {min(len(l['frames']) for l in passate)} a "
-        f"{max(len(l['frames']) for l in passate)} scatti"
-    )
+    else:
+        # Non e' piu' un errore fatale: le passate servono a tenere gli scatti di bordo,
+        # non a decidere chi entra nel mosaico. Un volo senza tratti rettilinei -- una
+        # spirale, un range di frame tutto dentro una virata -- si dirada lo stesso lungo
+        # il percorso, e cio' che manca sono solo i bordi dell'area.
+        print(
+            f"  rotta dominante {statistiche['axis_deg']:.2f} gradi | "
+            f"{statistiche['curve']} scatti in virata | nessuna passata riconosciuta: "
+            f"il diradamento seguira' il solo percorso"
+        )
 
-    tenuti = sorted(
-        i
-        for passata in passate
-        for i in flight.subsample_leg(
-            posizioni, passata["frames"], altezza_m, args.overlap_frontale
-        )
+    tenuti = flight.select_frames(
+        records, posizioni, passate, altezza_m, args.overlap_frontale
     )
+    if not tenuti:
+        raise SystemExit(
+            "Nessuno scatto utilizzabile: il gimbal non ha mai guardato il nadir entro "
+            "tolleranza, quindi di nessuna immagine si sa che impronta abbia a terra."
+        )
     print(
         f"  diradamento a overlap {args.overlap_frontale:.0%}: "
-        f"{len(tenuti)} scatti su {statistiche['straight']} non in virata"
+        f"{len(tenuti)} scatti su {statistiche['usable']} con impronta rettangolare"
     )
     return sorgente, tenuti
 

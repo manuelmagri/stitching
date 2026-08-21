@@ -1,7 +1,7 @@
 # stitching-rifatto
 
 Compone un **mosaico georeferenziato** — un GeoTIFF in UTM, con alfa e piramidi interne —
-dalle immagini di un volo drone a greca.
+dalle immagini di un volo drone a greca, sia su un'area compatta sia lungo un corridoio.
 
 Tutto ciò che caratterizza il volo (range dei frame, direzione delle passate, scatti in
 virata, overlap, risoluzione di lavoro) viene dedotto dai dati. Le opzioni servono solo a
@@ -234,13 +234,20 @@ Tutto in `output/`:
 | `mosaic.tif` | il mosaico. GeoTIFF in UTM, 4 bande uint8 (RGB + alfa), LZW, tiled 256×256, `BIGTIFF=IF_SAFER`, piramidi interne 2/4/8/16/32 |
 | `mosaic_preview.jpg` | anteprima, lato lungo max 2000 px. Il GeoTIFF è troppo grande da guardare |
 | `mosaic_layout.jpg` | **diagnostico**: le impronte come rettangoli colorati in ordine temporale (rosso → magenta), col numero di frame e la freccia di rotta |
-| `<nome>_mosaic.csv` | un CSV di punti della cartella del volo, riscritto con i valori tarati sul mosaico. Gli originali non vengono toccati |
+| `<nome>_mosaic.csv` | un CSV di punti trovato **assieme alle immagini** del volo, riscritto con i valori tarati sul mosaico. Gli originali non vengono toccati |
 
 Il **layout** va guardato prima del mosaico: costa un istante e mostra subito una passata
 fuori posto, mentre accorgersene dal mosaico costa l'intera composizione.
 
 Sui **CSV**: accanto alle immagini possono arrivare dei rilievi con le coordinate tarate su
-*uno* scatto. Composto il mosaico quel pixel non esiste più. La rimappatura passa per la
+*uno* scatto. Si rimappano **solo se stanno nella cartella assieme alle immagini** del volo,
+e non è un dettaglio su dove cercarli: è la sola cosa che dica di quale volo parla un CSV,
+perché i nomi che cita — `IMG_0008_2` — si ripetono identici su consegne diverse. Trovato in
+una cartella senza quegli scatti verrebbe rimappato per omonimia, cioè sbagliato in silenzio:
+in quel caso non si produce niente e il riepilogo lo dichiara. Se i CSV sono nella cartella
+gemella (`<volo>` invece di `<volo>_rettificate`, o viceversa) te lo dice, invece di tacere.
+
+Composto il mosaico quel pixel non esiste più. La rimappatura passa per la
 **posa raffinata**, non per la latitudine dichiarata: la seconda darebbe una coordinata
 geograficamente corretta ma sul mosaico cadrebbe *accanto* alla feature, sfalsata di quanto
 il raffinamento ha spostato quell'immagine — che è esattamente ciò che tutta la pipeline
@@ -277,7 +284,7 @@ $ python main.py immagini/georef
 
 == Passate
   rotta dominante -35.04 gradi | 0 scatti in virata | 3 passate da 4 a 10 scatti
-  diradamento a overlap 62%: 23 scatti su 23 non in virata
+  diradamento a overlap 62%: 23 scatti su 23 con impronta rettangolare
 
 == Pose iniziali
   lavoro a 795x585 (fattore 2.00148), GSD canvas 0.00862 m/px
@@ -287,46 +294,49 @@ $ python main.py immagini/georef
   33 coppie sopra il 15%
 
 == Feature ORB (tetto 3000 per scatto)
-  68949 feature in 3 MB (restano in memoria per tutto il volo)
+  68952 feature in 3 MB (restano in memoria per tutto il volo)
 
 == Matching
   21/33 vincoli validi (scartati: 12 con pochi inlier, 0 in disaccordo col seed)
-  il grafo non regge: rialzo il tetto delle feature da 3000 a 12000 e riprovo (circa 93 s)
+  il grafo non regge: rialzo il tetto delle feature da 3000 a 12000 e riprovo (circa 68 s)
 
 == Feature ORB (tetto 12000 per scatto)
-  269831 feature in 11 MB (restano in memoria per tutto il volo)
+  269794 feature in 11 MB (restano in memoria per tutto il volo)
 
 == Matching
-  27/33 vincoli validi (scartati: 6 con pochi inlier, 0 in disaccordo col seed)
-  1 componenti (la maggiore 23) | grado 1/2/3 | 5 cicli indipendenti
+  28/33 vincoli validi (scartati: 5 con pochi inlier, 0 in disaccordo col seed)
+  1 componenti (la maggiore 23) | grado 1/3/3 | 6 cicli indipendenti
 
 == Raffinamento globale
-  residuo fotografico mediano 44.84 px -> 1.30 px
-  scala dei fotogrammi: da 0.916 a 1.072 volte il seed
+  residuo fotografico mediano 52.75 px -> 1.12 px
+  scala dei fotogrammi: da 0.913 a 1.054 volte il seed
 
 == Georeferenziazione (chiusura sul GPS)
   EPSG:32632
-  rotazione assorbita +0.207 gradi, attesa nulla perche' il frame locale e' gia' in nord griglia
-  scala +2.56%
-  scarto dal GPS: mediana 0.42 m, RMS 0.56 m, massimo 1.14 m (0 outlier su 23)
+  rotazione assorbita +0.180 gradi, attesa nulla perche' il frame locale e' gia' in nord griglia
+  scala +2.39%
+  scarto dal GPS: mediana 0.43 m, RMS 0.55 m, massimo 1.04 m (0 outlier su 23)
   NB: il GPS ha seminato anche le posizioni, quindi questo scarto NON e' una validazione indipendente della ricostruzione.
 
 == Mosaico
-  scatti a 1591x1171 | canvas 5926x8003 = 47 Mpx | GSD 0.00431 m/px
+  scatti a 1591x1171 | canvas 5955x7973 = 47 Mpx | GSD 0.00431 m/px
   layout diagnostico: output\mosaic_layout.jpg
 
 == Piano di fusione
-  guadagni da 0.766 a 1.286 (deviazione standard 0.109) | 5 s
+  guadagni da 0.767 a 1.286 (deviazione standard 0.109) | 3 s
+  8 oggetti sottratti al taglio: gli scatti non concordano, quindi non stanno sul piano, e spezzarli li rovinerebbe
 
 == Composizione
-  output\mosaic.tif (109 MB) | 53 letture per 23 scatti (2.30 per scatto)
+  output\mosaic.tif (108 MB) | 53 letture per 23 scatti (2.30 per scatto)
   anteprima: output\mosaic_preview.jpg
+  timbrato con 23 fotogrammi da immagini\georef_rettificate (impronta 00d2517b36df8192, del 2026-08-15 00:21:38)
+  per verificarlo: python -m utils.georef output/mosaic.tif immagini\georef
 
 == Punti sul mosaico
-  mine_mosaic.csv: 5/5 punti | il raffinamento li ha spostati di 0.420 m di mediana, 0.540 m di massimo
-  subsoil_data_mosaic.csv: 54/54 punti | il raffinamento li ha spostati di 0.436 m di mediana, 1.828 m di massimo | 2 letti sullo scatto accanto, fuori dal proprio
+  mine_mosaic.csv: 5/5 punti | il raffinamento li ha spostati di 0.471 m di mediana, 0.524 m di massimo
+  subsoil_data_mosaic.csv: 54/54 punti | il raffinamento li ha spostati di 0.448 m di mediana, 1.726 m di massimo | 2 letti sullo scatto accanto, fuori dal proprio
 
-== Fine, in 38 s
+== Fine, in 25 s
 ```
 
 Questa corsa mostra due rimedi automatici che scattano: la soglia laterale **scesa da 25% a
@@ -341,20 +351,50 @@ primo tentativo nessuno dei due si muove.
 ### Caricamento e passate
 
 `rotta dominante` è l'asse del volo, stimato raddoppiando gli angoli così che due rotte
-opposte diventino lo stesso angolo. Se il volo non ha un asse dominante — una spirale — la
-segmentazione in passate non ha senso e il programma si ferma.
+opposte diventino lo stesso angolo.
 
-`scatti in virata` non entrano nel mosaico: la camera si muove in fretta e la copertura è
-fuori dall'area da rilevare. **Non spariscono però dal problema**: la loro odometria resta,
-ed è quella che trasporta la posizione da una passata alla successiva quando il matching
-fra passate adiacenti non regge.
+`scatti in virata` sono quelli che non stavano percorrendo una passata. **Non sono scatti
+scartati**: chi entra nel mosaico lo decide la copertura, non l'appartenenza a una passata
+(sotto). La loro odometria serve comunque, ed è quella che trasporta la posizione da una
+passata alla successiva quando il matching fra passate adiacenti non regge.
+
+`N passate da a a b scatti` è la lettura della greca. Se il volo non ha tratti rettilinei
+riconoscibili — una spirale, un range `--da/--a` tutto dentro una virata — il programma non
+si ferma: lo dichiara e dirada lungo il solo percorso, perdendo soltanto gli scatti di bordo
+che le passate servivano a tenere.
+
+`diradamento a overlap F%` conta gli scatti tenuti su quelli con **impronta rettangolare**,
+cioè con il gimbal al nadir: quelli che non lo sono non entrano mai, perché di loro la
+pipeline non sa dire che cosa inquadrino a terra.
+
+### Aree compatte e corridoi
+
+Una greca d'area ha passate lunghe molte impronte, e si vira **fuori** dall'area: il volo di
+prova ha 18 passate da 260 m contro un'impronta along-track di 33 m. Un rilievo di corridoio
+— una strada, un torrente — ha le proporzioni rovesciate: passate da 15 a 40 m contro
+un'impronta di 55-66 m, cioè una passata intera copre *meno* di un fotogramma, e si vira
+**sopra** il terreno da rilevare.
+
+Da qui due scelte in [`utils/flight.py`](utils/flight.py), che sono ciò che permette allo
+stesso codice di cucire entrambi:
+
+- una passata deve coprire terreno nuovo, e il metro è il **minore** fra un'impronta
+  along-track e metà della passata tipica di quel volo. Il minore, così un volo d'area tiene
+  il metro severo e un corridoio non resta senza nemmeno una passata riconosciuta;
+- i fotogrammi si scelgono **lungo il percorso**, tenendone uno ogni volta che ci si è
+  allontanati abbastanza dall'ultimo tenuto, non passata per passata. Le estremità delle
+  passate si tengono comunque, perché coprono i bordi dove il drone inverte.
+
+Sul volo di prova le due regole scelgono esattamente gli stessi fotogrammi di una
+segmentazione per passate — 284 su 835, lo stesso identico insieme — quindi il mosaico di un
+volo d'area non cambia.
 
 ### Grafo delle coppie e matching
 
 Le tre cifre da guardare sono nella riga dopo il secondo matching:
 
 ```
-1 componenti (la maggiore 23) | grado 1/2/3 | 5 cicli indipendenti
+1 componenti (la maggiore 23) | grado 1/3/3 | 6 cicli indipendenti
 ```
 
 | | significato |
@@ -376,8 +416,8 @@ differenza.
 ### Raffinamento globale
 
 ```
-residuo fotografico mediano 44.84 px -> 1.30 px
-scala dei fotogrammi: da 0.916 a 1.072 volte il seed
+residuo fotografico mediano 52.75 px -> 1.12 px
+scala dei fotogrammi: da 0.913 a 1.054 volte il seed
 ```
 
 La prima riga è quanto le coppie si contraddicono, prima e dopo. La seconda è il suo
@@ -393,9 +433,9 @@ quel caso **le pose seed potrebbero essere migliori di quelle raffinate**.
 ### Georeferenziazione
 
 ```
-rotazione assorbita +0.207 gradi, attesa nulla perche' il frame locale e' gia' in nord griglia
-scala +2.56%
-scarto dal GPS: mediana 0.42 m, RMS 0.56 m, massimo 1.14 m (0 outlier su 23)
+rotazione assorbita +0.180 gradi, attesa nulla perche' il frame locale e' gia' in nord griglia
+scala +2.39%
+scarto dal GPS: mediana 0.43 m, RMS 0.55 m, massimo 1.04 m (0 outlier su 23)
 ```
 
 Il fit è una **similarità completa**, non una traslazione, per due ragioni: deve assorbire
@@ -439,7 +479,7 @@ utils/
   dataset               calibrazione, metadati, percorsi. Verifica che le immagini su
                         disco corrispondano alla calibrazione, prima di ogni altra cosa
   localframe            odometria integrata -> posizioni locali metriche
-  flight                scatti in virata e segmentazione in passate, dal solo assetto
+  flight                virate, passate e scelta dei fotogrammi, dal solo assetto
   poses                 posa iniziale di ogni scatto, e raffinamento globale
   footprint             impronta a terra, derivata dalla posa
 ─────────────────────── ⟨ la frattura: da qui in giù nulla sa da dove vengono le pose ⟩
@@ -512,7 +552,7 @@ frequenze, dove il disallineamento non si vede.
 | `Dati XMP non trovati ... questo passo vuole gli scatti ORIGINALI` | hai puntato `create_calibration`, `undistort_images` o `create_metadata` su una cartella già rettificata |
 | `La calibrazione dichiara immagini WxH, ma ... è W'xH'` | calibrazione e immagini rettificate non vengono dalla stessa esecuzione. Rigenera la calibrazione |
 | `metadata.json e translations.json non descrivono lo stesso volo` | i due file sono disallineati: rigenera `create_translations` |
-| `Nessuna passata riconosciuta` | il volo non ha una direzione dominante, oppure il range `--da/--a` cade tutto dentro una virata |
+| `Nessuno scatto utilizzabile` | il gimbal non ha mai guardato il nadir entro tolleranza: di nessuna immagine si sa che impronta abbia a terra |
 | `Nessuna coppia di scatti si sovrappone abbastanza` | le impronte non si toccano. Controlla il range di frame e la quota |
 | `Nessun vincolo fotografico valido` | le immagini non si agganciano fra loro. Controlla che siano quelle giuste e a fuoco |
 | `riduzione anisotropa` | i fotogrammi non hanno pixel quadrati: le pose sono similarità e non possono assorbire una scala diversa per asse |
@@ -565,6 +605,7 @@ intuizioni, ed è raccolto qui.
 | `nadir_margin` | 16 px | `utils/compositing.py` | libertà del taglio rispetto al territorio nadirale |
 | `vo_weight` | 0,5 | `utils/poses.py` | l'odometria disponibile sbaglia 0,46 m per passo, una dozzina di pixel, contro l'uno o due di un vincolo fotografico. Serve dove le immagini tacciono, non a correggerle |
 | tolleranza `agrees_with_seed` | 0,25 diagonali | `utils/matching.py` | larga di proposito: scarta gli agganci assurdi su tessitura ripetitiva, non impone il seed alle immagini |
+| `FRAZIONE_PASSATA_TIPICA` | 0,5 | `utils/flight.py` | quanto può essere più corta della passata tipica una sequenza e restare una passata. Non critica: sui corridoi le estensioni sono quantizzate dal passo fra scatti (15, 23, 31, 39 m con passo 7,7 m), e fra 0,3 e 0,5 si spostano 6 sequenze su 86. Sul volo d'area non tocca niente, perché lì il minimo resta l'impronta |
 
 ### Note misurate sui dati di prova
 

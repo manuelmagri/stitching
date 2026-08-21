@@ -76,7 +76,11 @@ def genera_fotogrammi(
     print(f"{len(sorgenti)} ortofoto in {cartella_volo} | {utm_crs}")
 
     # Prima passata: geometria di ogni scatto. Il fotogramma comune si puo' decidere solo
-    # dopo aver visto tutti, perche' `frames.FrameReader` assume una sola dimensione.
+    # dopo aver visto tutti, perche' `frames.FrameReader` assume una sola dimensione. Di
+    # ogni scatto pero' sopravvive solo cio' che quella decisione richiede -- rettangolo,
+    # maschera erosa, tag -- e non i pixel, che si rileggono nel ciclo finale uno per
+    # volta: tenerli tutti sarebbe il volo intero in RAM, contro la finestra scorrevole
+    # che il resto della pipeline rispetta.
     letti = [_ortho.leggi_ortofoto(path, to_utm, margine) for path in sorgenti]
     rettangoli = [
         _ortho.footprint_rect_utm(info["mask_erosa"], info["px_to_utm"]) for info in letti
@@ -101,8 +105,11 @@ def genera_fotogrammi(
 
     # Il primo tentativo di dimensione viene dal fotogramma PIU' PICCOLO del volo, non dal
     # piu' grande: cosi' ogni tile sta dentro la propria impronta valida e non resta un
-    # solo pixel di nodata da mascherare a valle. Si perde l'1-2% ai bordi, che e' la parte
-    # piu' obliqua del fotogramma e la meno affidabile.
+    # solo pixel di nodata da mascherare a valle. Da solo non basta comunque -- e' un
+    # rettangolo CIRCOSCRITTO, e su `georef` nessuno dei 23 scatti lo regge -- quindi
+    # `dimensione_comune` lo stringe ancora. Fra le due cose se ne va circa il 10% della
+    # superficie (1591x1171 = 6,85 x 5,04 m, contro i 7,14 x 5,34 m dell'impronta), tutto
+    # ai bordi, che sono la parte piu' obliqua del fotogramma e la meno affidabile.
     lato_lungo = min(r.lato_lungo for r in rettangoli)
     lato_corto = min(r.lato_corto for r in rettangoli)
     lato_cross, lato_along = (lato_lungo, lato_corto) if corto_along else (lato_corto, lato_lungo)
@@ -129,7 +136,7 @@ def genera_fotogrammi(
         # anche di questa, per ritrovarsi dopo il ricampionamento.
         S, residuo_sorgente = _ortho.affine_campionata(info["size"], info["px_to_utm"])
         residui_sorgente.append(residuo_sorgente)
-        tile = _ortho.warp(info["immagine"], M, image_size, cv2.INTER_CUBIC)
+        tile = _ortho.warp(_ortho.leggi_pixel(info["path"]), M, image_size, cv2.INTER_CUBIC)
         destinazione = frames_dir / info["path"].name
         cv2.imwrite(str(destinazione), tile, [cv2.IMWRITE_TIFF_COMPRESSION, 5])  # 5 = LZW
 

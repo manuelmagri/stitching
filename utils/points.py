@@ -6,6 +6,13 @@ sua posizione geografica. Composto il mosaico, quel pixel non esiste piu': serve
 riga con i valori tarati sul mosaico, ed e' quello che si scrive qui, in
 `output/<nome>_mosaic.csv`. Gli originali non vengono toccati.
 
+**Accanto alle immagini** e' la condizione, non un dettaglio di dove cercarli: e' la sola
+cosa che dica di quale volo parla un CSV. Dentro non c'e' niente che lo dichiari -- i nomi
+che cita, `IMG_0008_2`, si ripetono identici su consegne diverse -- quindi un CSV trovato
+in una cartella che non contiene gli scatti a cui e' tarato verrebbe rimappato per
+omonimia, cioe' sbagliato senza che nulla lo segnali. In quel caso non si produce niente e
+lo si dice.
+
 **Si passa per la posa raffinata, non per la latitudine e longitudine dichiarate.** Sono
 due strade diverse e portano a punti diversi. La seconda darebbe una coordinata
 geograficamente corretta, ma sul mosaico cadrebbe ACCANTO alla feature, sfalsata di quanto
@@ -135,6 +142,46 @@ def _fotogramma_su_cui_misurare(in_utm, preferito, inverse, image_size):
     return migliore, px_migliore, True
 
 
+def _csv_di_punti(cartella: Path) -> list[Path]:
+    """I CSV da rimappare in una cartella. Quelli gia' rimappati non si rimappano di nuovo."""
+    return sorted(p for p in cartella.glob("*.csv") if not p.stem.endswith("_mosaic"))
+
+
+def _con_le_immagini_del_volo(cartella: Path, sorgente) -> bool:
+    """Se in `cartella` ci sia davvero almeno uno degli scatti del volo, e non solo i CSV.
+
+    Si guardano sia il file consegnato sia il fotogramma prodotto, perche' a seconda della
+    sorgente e' l'uno o l'altro a stare li': su una consegna EXIF la cartella indicata
+    contiene le immagini che la pipeline legge, su una per ortofoto contiene le ortofoto
+    originali mentre i fotogrammi stanno in `<volo>_rettificate`. In entrambi i casi e' la
+    cartella su cui i punti sono stati misurati.
+    """
+    cartella = cartella.resolve()
+    for record in sorgente.records:
+        for chiave in (record.get("source"), record.get("path")):
+            if chiave is None:
+                continue
+            percorso = Path(chiave)
+            if percorso.parent.resolve() == cartella and percorso.is_file():
+                return True
+    return False
+
+
+def _cartella_gemella(cartella: Path) -> Path | None:
+    """L'altra meta' della coppia `<volo>` / `<volo>_rettificate`, se esiste su disco.
+
+    Serve solo per una riga di diagnostica. I due pre-pass scrivono i fotogrammi accanto
+    alla consegna e main.py si punta ora sull'una ora sull'altra: un CSV lasciato in quella
+    sbagliata non sarebbe rimappato, e senza questa riga sparirebbe in silenzio.
+    """
+    nome = cartella.name
+    suffisso = "_rettificate"
+    gemella = cartella.parent / (
+        nome[: -len(suffisso)] if nome.endswith(suffisso) else nome + suffisso
+    )
+    return gemella if gemella.is_dir() else None
+
+
 def remap_folder(
     sorgente,
     tenuti: list[int],
@@ -146,7 +193,11 @@ def remap_folder(
     output_dir: Path,
     mosaic_name: str,
 ) -> list[str]:
-    """Riscrive ogni CSV della cartella del volo con i valori tarati sul mosaico.
+    """Riscrive con i valori tarati sul mosaico ogni CSV che sta assieme alle immagini.
+
+    La cartella e' quella indicata a main.py, che e' anche quella in cui stanno gli scatti
+    su cui i punti sono stati misurati: se li' non c'e' nessuna immagine del volo non si
+    rimappa niente, perche' non ci sarebbe modo di sapere a quali scatti il CSV sia tarato.
 
     `transforms` sono le pose gia' traslate sul canvas finale, alla risoluzione di
     `image_size`, nell'ordine di `tenuti`: le stesse che compongono il mosaico, quindi per
@@ -154,11 +205,22 @@ def remap_folder(
 
     Ritorna una riga di riepilogo per file, da stampare.
     """
-    csv_sorgenti = sorted(
-        p for p in Path(sorgente.source_dir).glob("*.csv") if not p.stem.endswith("_mosaic")
-    )
+    cartella = Path(sorgente.source_dir)
+    csv_sorgenti = _csv_di_punti(cartella)
     if not csv_sorgenti:
+        gemella = _cartella_gemella(cartella)
+        altrove = _csv_di_punti(gemella) if gemella else []
+        if altrove:
+            return [
+                f"{len(altrove)} file .csv in {gemella}, che non e' la cartella delle "
+                f"immagini di questo volo: spostali in {cartella} per rimapparli"
+            ]
         return []
+    if not _con_le_immagini_del_volo(cartella, sorgente):
+        return [
+            f"{len(csv_sorgenti)} file .csv non rimappati: in {cartella} non c'e' nessuno "
+            "degli scatti del volo, quindi non si sa a quali immagini siano tarati"
+        ]
     if "frame_to_utm" not in sorgente.records[0]:
         return [
             f"{len(csv_sorgenti)} file .csv non rimappati: la sorgente {sorgente.kind!r} non "
